@@ -1,20 +1,47 @@
 package main
 
-import "log"
+import (
+	"context"
+	"log"
+	"net/http"
+)
 
 func main() {
-	app, err := newApp(onAction)
+	ctx := context.Background()
+	socket := newSocket()
+
+	app, err := newApp(func(action Action, data interface{}) {
+		switch action {
+		case ActionContainerStarted:
+			socket.Send(newMessage(MessageAddContainer, data))
+		case ActionContainerStopped:
+			socket.Send(newMessage(MessageRemoveContainer, data))
+		}
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	app.Run()
+
+	socket.OnClientConnected = func() {
+		log.Println("Client connected")
+		containers := []Container{}
+		for _, c := range app.Containers {
+			containers = append(containers, c)
+		}
+		socket.Send(newMessage(MessageFetchContainers, containers))
+	}
+
+	go app.Run(ctx)
+	http.HandleFunc("/ws", socket.HandleWebSocket)
+	log.Fatal(http.ListenAndServe(":8000", nil))
 }
 
-func onAction(action Action, data interface{}) {
-	switch action {
-	case ActionContainerStarted:
-		log.Printf("Container started: %v\n", data)
-	case ActionContainerStopped:
-		log.Printf("Container stopped: %v\n", data)
+func newMessage(kind int, payload interface{}) interface{} {
+	return struct {
+		Kind    int         `json:"kind"`
+		Payload interface{} `json:"payload"`
+	}{
+		kind,
+		payload,
 	}
 }

@@ -2,13 +2,16 @@ import Vue from 'vue';
 import Vuex from 'vuex';
 
 import { Container, Log } from './types';
+import Socket from './socket';
 
 const MAX_LOGS = 100;
+const WS_URL = 'ws://localhost:8000/ws';
+
 const mutations = {
   ADD_CONTAINER: 'ADD_CONTAINER',
   REMOVE_CONTAINER: 'REMOVE_CONTAINER',
   SELECT_CONTAINER: 'SELECT_CONTAINER',
-  ADD_LOGS: 'ADD_LOGS',
+  FETCH_CONTAINERS: 'FETCH_CONTAINERS',
 };
 
 Vue.use(Vuex);
@@ -31,7 +34,8 @@ const store = new Vuex.Store({
         return;
       }
 
-      for (let c of state.containers) {
+      const containers = state.containers;
+      for (let c of containers) {
         c.isSelected = c.id === id;
         if (c.isSelected) {
           state.subject = c;
@@ -39,8 +43,8 @@ const store = new Vuex.Store({
       }
       state.logs = [];
     },
-    [mutations.ADD_LOGS](state, logs) {
-      state.logs = [...logs, ...state.logs].slice(0, MAX_LOGS);
+    [mutations.FETCH_CONTAINERS](state, containers) {
+      state.containers = containers;
     },
   },
   actions: {
@@ -53,17 +57,16 @@ const store = new Vuex.Store({
     selectContainer({ commit }, id) {
       commit(mutations.SELECT_CONTAINER, id);
     },
-    addLogs({ commit }, logs) {
-      commit(mutations.ADD_LOGS, logs);
+    fetchContainers({ commit }, containers) {
+      commit(mutations.FETCH_CONTAINERS, containers);
     },
   },
 });
 
-store.dispatch('addContainer', new Container('42', 'Test container'));
-store.dispatch('addContainer', new Container('56', 'Another one'));
-store.dispatch('addContainer', new Container('70', 'Last one'));
-for (let i = 1; i <= 3; i++) {
-  store.dispatch('addContainer', new Container('100' + i, 'Container #' + i));
-}
+const socket = new Socket(WS_URL);
+socket.onAddContainer = (c) => store.dispatch('addContainer', c);
+socket.onRemoveContainer = (id) => store.dispatch('removeContainer', id);
+socket.onFetchContainers = (containers) => store.dispatch('fetchContainers', containers);
+socket.open();
 
 export default store;

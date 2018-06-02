@@ -3,32 +3,49 @@ package main
 import (
 	"context"
 	"log"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 )
 
 type Container struct {
-	ID   string
-	Name string
+	ID         string            `json:"id"`
+	Names      []string          `json:"names"`
+	Image      string            `json:"image"`
+	ImageID    string            `json:"image_id"`
+	Command    string            `json:"command"`
+	SizeRw     int64             `json:"size_rw,omitempty"`
+	SizeRootFs int64             `json:"size_root_fs,omitempty"`
+	Labels     map[string]string `json:"labels"`
+}
+
+func newContainer(c types.Container) Container {
+	container := Container{
+		ID:         c.ID,
+		Names:      c.Names,
+		Image:      c.Image,
+		Command:    c.Command,
+		SizeRw:     c.SizeRw,
+		SizeRootFs: c.SizeRootFs,
+		Labels:     c.Labels,
+	}
+	return container
 }
 
 type Action int
 
 const (
-	ActionContainerStarted = iota
-	ActionContainerStopped = iota
+	ActionContainerStarted = iota + 1
+	ActionContainerStopped
 )
 
 type ActionListener func(a Action, data interface{})
 
 type App struct {
-	containers     map[string]Container
+	Containers     map[string]Container
 	client         *client.Client
 	mutex          sync.Mutex
 	actionListener ActionListener
@@ -41,82 +58,80 @@ func newApp(actionListener ActionListener) (*App, error) {
 	}
 
 	return &App{
-		containers:     make(map[string]Container),
+		Containers:     make(map[string]Container),
 		client:         cli,
 		mutex:          sync.Mutex{},
 		actionListener: actionListener,
 	}, nil
 }
 
-func (a *App) addContainer(id string) error {
-	c, err := a.client.ContainerInspect(context.Background(), id)
+func (a *App) addContainer(ctx context.Context, id string) error {
+	fc := filters.NewArgs()
+	fc.Add("id", id)
+	containers, err := a.client.ContainerList(ctx, types.ContainerListOptions{
+		Size:    true,
+		All:     true,
+		Filters: fc,
+	})
 	if err != nil {
+		log.Println(err)
 		return err
 	}
+
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
-	container := Container{
-		ID:   c.ID,
-		Name: c.Name,
-	}
-	a.containers[id] = container
-	a.actionListener(ActionContainerStarted, container)
+	c := newContainer(containers[0])
+	a.Containers[id] = c
+	a.actionListener(ActionContainerStarted, c)
+
 	return nil
 }
 
 func (a *App) removeContainer(id string) {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
-	if _, ok := a.containers[id]; ok {
-		delete(a.containers, id)
+	if _, ok := a.Containers[id]; ok {
+		delete(a.Containers, id)
 		a.actionListener(ActionContainerStopped, id)
 	}
 }
 
-func (a *App) Run() {
-	shutdown := make(chan os.Signal, 1)
-	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		a.fetchContainers()
-		eventsCh, errorsCh := a.client.Events(context.Background(), types.EventsOptions{})
+func (a *App) Run(ctx context.Context) {
+	a.fetchContainers(ctx)
 
-		for {
-			select {
-			case err := <-errorsCh:
+	cf := filters.NewArgs()
+	cf.Add("type", events.ContainerEventType)
+	eventsCh, _ := a.client.Events(ctx, types.EventsOptions{
+		Filters: cf,
+	})
+
+	for msg := range eventsCh {
+		switch msg.Action {
+		case "start":
+			if err := a.addContainer(ctx, msg.ID); err != nil {
 				log.Println(err)
-			case msg := <-eventsCh:
-				if msg.Type == events.ContainerEventType {
-					// Are there action constants somewhere?
-					switch msg.Action {
-					case "start":
-						if err := a.addContainer(msg.ID); err != nil {
-							log.Println(err)
-						}
-					case "die":
-						fallthrough
-					case "stop":
-						a.removeContainer(msg.ID)
-					}
-				}
 			}
+		case "die":
+			fallthrough
+		case "stop":
+			a.removeContainer(msg.ID)
 		}
-	}()
-	<-shutdown
+	}
 }
 
-func (a *App) fetchContainers() {
-	containers, err := a.client.ContainerList(context.Background(), types.ContainerListOptions{})
+func (a *App) fetchContainers(ctx context.Context) {
+	containers, err := a.client.ContainerList(ctx, types.ContainerListOptions{
+		Size: true,
+		All:  true,
+	})
 	if err != nil {
 		log.Println(err)
 		return
 	}
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
-	a.containers = make(map[string]Container)
+	a.Containers = make(map[string]Container)
 	for _, c := range containers {
-		a.containers[c.ID] = Container{
-			ID:   c.ID,
-			Name: c.Names[0],
-		}
+		a.Containers[c.ID] = newContainer(c)
 	}
 }
